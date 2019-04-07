@@ -1,0 +1,144 @@
+1. Start with basic install, describe plan and format.
+
+2. git clone https://github.com/ElementsProject/lightning.git
+
+3. Look at docs/INSTALL.md;     sudo apt-get install -y \
+      autoconf automake build-essential git libtool libgmp-dev \
+      libsqlite3-dev python python3 net-tools zlib1g-dev libsodium-dev \
+	  libbase58-dev bitcoind
+
+4. ./configure --enable-developer && make -j7 && make install
+
+5. bitcoind -regtest &
+
+6. mkdir /tmp/l1 /tmp/l2; lightningd --network=regtest --lightning-dir=/tmp/l1 &
+   Caution them on network-specific db files!
+   Note that default is ~/.lightning/
+
+7. Show `pstree -p $(cat /tmp/l1/lightningd-regtest.pid)`
+
+8. Describe the three subdaemons we see, and the one plugin.
+
+9. Run lightning-cli --lightning-dir=/tmp/l1 getinfo
+   - Discuss alias, color
+   - Discuss address vs binding
+
+9a. Create aliases:
+   - alias l1='lightning-cli --lightning-dir=/tmp/l1'
+   - alias l2='l2'
+
+10. Pimp our node. man lightningd-config
+   - echo allow-deprecated-apis=false >> /tmp/l1/config
+   - echo network=regtest >> /tmp/l1/config
+   - echo log-level=debug >> /tmp/l1/config1
+   - echo log-file=/tmp/l1/log >> /tmp/l1/config1
+   - echo rgb=??? >> /tmp/l1/config
+   - echo alias=??? >> /tmp/l1/config1
+
+11. Restart node and check getinfo again.
+   - Describe ID.
+
+12. ls -l /tmp/l1
+   - Describe files.
+
+12. Start another peer, and connect them.
+    lightningd --network=regtest --lightning-dir=/tmp/l2 &
+    ... on a separate port!
+    lightningd --network=regtest --lightning-dir=/tmp/l2 --addr=/tmp/l2/peer &
+    ... demonstrate bug!
+    rm /tmp/l2/peer; lightningd --network=regtest --lightning-dir=/tmp/l2 --addr=/tmp/l2/peer --dev-debugger=connectd &
+    rm /tmp/l2/peer; lightningd --network=regtest --lightning-dir=/tmp/l2 --bind-addr=/tmp/l2/peer &
+
+    l1 connect <ID>@/tmp/l2/peer
+
+13. l1 listpeers; l2 listpeers
+    - Describe JSON briefly.
+
+14. Create our first plugin.
+    - /tmp/plugin.sh:
+    #! /bin/sh
+    cat > /tmp/plugin.log
+    - chmod a+x /tmp/plugin.sh
+    
+    - l1 stop
+    - lightningd --lightning-dir=/tmp/l1 --plugin=/tmp/plugin.sh &
+    - cat /tmp/plugin.log
+
+15. Let's make it answer to getmanifest (hack warning!)
+    while read line; do
+        case "$line" in *'"id"'*) ID="$line"; break;; esac
+    done
+    echo '{"jsonrpc":"2.0",'"$ID"'"result":{"options": [{"name": "dumboption", "type": "string", "description": "TBA"}],"rpcmethods": [{ "name": "dumbmethod", "usage": "", "description": "TBA" }]}}'
+    - lightningd --lightning-dir=/tmp/l1 --plugin=/tmp/plugin.sh --help
+    - lightningd --lightning-dir=/tmp/l1 --plugin=/tmp/plugin.sh --dumboption=999 &
+    - cat /tmp/plugin.log
+
+16. Time to stop playing around; a real plugin!
+    - cp contrib/plugins/helloworld.py /tmp/plugin.py
+    - (Note: already executable!)
+    - Needs pylightning; pip3 install pylightning, or cd contrib/pylightning && python3 setup.py develop
+    - lightningd --lightning-dir=/tmp/l1 --plugin=/tmp/plugin.py &
+    - l1 help
+
+17. Edit to our needs.
+    - Use flask to provide a web service.
+    - Prepend:
+    from flask import Flask
+    import threading
+    
+    app = Flask(__name__)
+    app.debug = False
+    
+    @app.route('/')
+    def hello_world():
+        return 'Hello, World!'
+
+    - Inside init:
+      threading.Thread(target=app.run, daemon=True).start()
+    - Test manually:
+    - /tmp/plugin.py
+    - { "id": 2, "method": "getmanifest", "params": {}}
+    - See response
+    - Test localhost:5000
+
+18. Serve an invoice from flask, by renaming hello_world():
+    - @app.route('/')
+      def serve_invoice():
+        # Label is an internal thing which needs to be unique: for serious
+        # systems this ensures that we can determine whether invoice
+        # creation succeeded or not if we crashed during.  We don't care
+        # that much!
+        randomness = secrets.token_hex(8)
+        invoice = plugin.rpc.invoice(msatoshi=24, label=randomness)
+        return invoice
+    - It fails!  Look in /tmp/l1/log, and fix!
+    
+19. Check out the invoice:
+    - devtools/bolt11-cli decode ...
+
+20. Test we can pay it:
+    - l1 connect <ID>@/tmp/l2/peer
+    - l2 newaddr
+    - bitcoin-cli -regtest sendtoaddress bcrt1... 10
+    - bitcoin-cli -regtest generatetoaddress 1 `bitcoin-cli -regtest getnewaddress`
+    - l2 listfunds
+    - l2 fundchannel <id1> 0.042btc
+    - l2 fundchannel <id1> 0.042btc 253perkw
+    - bitcoin-cli -regtest generatetoaddress 1 `bitcoin-cli -regtest getnewaddress`
+    - l2 listpeers
+    - l2 pay <invoice>
+
+21. Let's encode something into the preimage itself!
+    - The invoice is a contract: a signed offer to exchange a secret (preimage) for a payment.
+    - The invoice + preimage is *proof you paid*.
+    - It's 256 bits long, so for a low-security app like this, we can use 64 bits, leaving 24 bytes
+      for text.
+    - preimage=randomness+bytes('An unexpected surprise!!', encoding='utf8').hex()
+    - Reload, and pay.
+    - fromhexstr.sh on preimage.
+
+22. Let's make another plugin to make this simpler:
+    - getword.py
+    - l2 stop
+    - rm /tmp/l2/peer; lightningd --lightning-dir=/tmp/l2 --log-file=/tmp/l2/log --log-level=debug --network=regtest --plugin=/tmp/getword.py --bind-addr=/tmp/l2/peer &
+
